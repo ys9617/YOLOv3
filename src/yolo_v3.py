@@ -4,23 +4,15 @@ import time
 
 from openvino.inference_engine import IENetwork, IECore
 
-labels = ["person", "bicycle", "car", "motorbike", "aeroplane", "bus", "train", "truck",
-    "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
-    "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe",
-    "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
-    "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
-    "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana",
-    "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake",
-    "chair", "sofa", "pottedplant", "bed", "diningtable", "toilet", "tvmonitor", "laptop", "mouse",
-    "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator",
-    "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"]
-
 
 class Model_YOLO_V3:
-    def __init__(self, model_name, device='CPU'):
+    def __init__(self, model_name, device='CPU', threshold=0.6):
         self.model_weights = model_name + '.bin'
         self.model_structure = model_name + '.xml'
         self.device = device
+        self.threshold = threshold
+        self.nms_threshold = 0.4
+
         self.model = IECore().read_network(model=self.model_structure, weights=self.model_weights)
         
         self.input_name = next(iter(self.model.inputs))
@@ -28,6 +20,10 @@ class Model_YOLO_V3:
         self.output_names = ['detector/yolo-v3/Conv_6/BiasAdd/YoloRegion', \
                              'detector/yolo-v3/Conv_14/BiasAdd/YoloRegion', \
                              'detector/yolo-v3/Conv_22/BiasAdd/YoloRegion']
+
+        self.anchors = [[116,90, 156,198, 373,326], [30,61, 62,45, 59,119], [10,13, 16,30, 33,23]]
+        self.labels = []
+        self.load_labels('../models/coco.names')
 
         print('device : ', self.device)
         print('input name : ', self.input_name)
@@ -38,6 +34,11 @@ class Model_YOLO_V3:
     def load_model(self):
         self.net = IECore().load_network(self.model, self.device)
 
+
+    def load_labels(self, file_name):
+        with open(file_name) as f:
+            for id, name in enumerate(f):
+                self.labels.append(name.rstrip('\n'))
 
     def predict(self, image):
         input_img = self.preprocess_input(image)
@@ -61,9 +62,6 @@ class Model_YOLO_V3:
 
 
     def preprocess_output(self, outputs, image):
-        threshold = 0.6
-        anchors = [[116,90, 156,198, 373,326], [30,61, 62,45, 59,119], [10,13, 16,30, 33,23]]
-        
         h, w, c = image.shape
 
         _, _, input_h, input_w = self.input_shape
@@ -73,7 +71,7 @@ class Model_YOLO_V3:
 
         for i in range(num_box):
             output = np.squeeze(outputs[self.output_names[i]])
-            anchor = anchors[i]
+            anchor = self.anchors[i]
 
             _, grid_h, grid_w = output.shape
 
@@ -89,7 +87,7 @@ class Model_YOLO_V3:
                     for ib in range(num_box):
                         objectness = output[ih][iw][ib][4]
 
-                        if objectness >= threshold:
+                        if objectness >= self.threshold:
                             tx, ty, tw, th = output[ih][iw][ib][:4]
 
                             bx = round((iw + self.sigmoid(tx)) * grid_width) *  w / input_w
@@ -100,12 +98,8 @@ class Model_YOLO_V3:
                             classes = output[ih][iw][ib][5:]
                             
                             boxes.append([bx,by,bh,bw, classes])
-
-
-        nms_threshold = 0.4
-        num_class = 80
         
-        for c in range(num_class):
+        for c in range(len(self.labels)):
             sorted_idx = np.argsort([-box[4][c] for box in boxes])
             
             for i in range(len(sorted_idx)):
@@ -115,20 +109,20 @@ class Model_YOLO_V3:
                     for j in range(i+1, len(sorted_idx)):
                         idx_j = sorted_idx[j]
 
-                        if self.iou(boxes[idx_i], boxes[idx_j]) >= nms_threshold:
+                        if self.iou(boxes[idx_i], boxes[idx_j]) >= self.nms_threshold:
                             boxes[idx_j][4][c] = 0
 
         ret = []
 
         for box in boxes:
-            for i in range(num_class):
+            for i in range(len(self.labels)):
                 if box[4][i] > 0.5:
                     x0 = int(max(box[0]-box[3]/2, 0))
                     y0 = int(max(box[1]-box[2]/2, 0))
                     x1 = int(min(box[0]+box[3]/2, w-1))
                     y1 = int(min(box[1]+box[2]/2, h-1))
 
-                    ret.append([x0, y0, x1, y1, labels[np.argmax(box[4])]])
+                    ret.append([x0, y0, x1, y1, self.labels[np.argmax(box[4])]])
 
         return ret
 
@@ -157,6 +151,7 @@ class Model_YOLO_V3:
         union = w1*h1 + w2*h2 - intersect
 
         return float(intersect) / union
+
 
     def _interval_overlap(self, interval_a, interval_b):
         x1, x2 = interval_a
